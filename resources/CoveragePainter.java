@@ -2,9 +2,12 @@ package resources;
 
 import java.awt.Color;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.TreeSet;
 
 import ghidra.app.plugin.core.colorizer.ColorizingService;
 import ghidra.program.model.address.Address;
@@ -19,20 +22,49 @@ import ghidra.program.model.listing.Program;
 import ghidra.util.task.TaskMonitor;
 
 /**
- * Applies a {@link Coverage} onto a Ghidra program: rebases each executed block
- * onto the program's image base, snaps it to the containing basic block, and
- * paints that block's background. Colouring the whole basic block (rather than a
- * raw byte range) is what makes the Function Graph light up node-by-node, which
- * is the "highlight blocks in the block diagram" behaviour we are after - the
- * Listing and the Graph both read the same background colour from the
- * ColorizingService.
+ * Maps a {@link Coverage} onto a Ghidra program and paints it.
+ *
+ * Each executed block is rebased onto the program's image base and snapped to
+ * the basic block that contains it, so whole Function-Graph nodes light up (the
+ * Listing and the Graph share the ColorizingService background).
+ *
+ * Two modes:
+ *   - single: paint one coverage set green.
+ *   - diff: compare a baseline set (e.g. the corpus) against a target set (e.g.
+ *     a crash) and colour blocks by which sets reached them - the blocks a crash
+ *     reached that the corpus never did are what you want to see.
  */
 public class CoveragePainter {
 
-    /** Soft green, legible over both light and dark listing backgrounds. */
-    public static final Color COVERED_COLOR = new Color(120, 190, 120);
+    /** Reached (single mode) / reached by both sets (diff mode). */
+    public static final Color COVERED_COLOR = new Color(120, 190, 120);   // green
+    /** Diff: reached by the target only - the interesting, crash-unique blocks. */
+    public static final Color TARGET_ONLY_COLOR = new Color(220, 120, 90); // orange-red
+    /** Diff: reached by the baseline only. */
+    public static final Color BASELINE_ONLY_COLOR = new Color(120, 150, 200); // muted blue
 
-    /** Per-function rollup shown in the panel's table. */
+    /** Rebased, block-snapped coverage for one file - the input to painting and diffing. */
+    public static class CoverageData {
+        public final String moduleName;
+        public final int blocksInFile;
+        public final int blocksMapped;
+        /** covered basic-block start address -> that block's address range */
+        public final Map<Address, AddressSet> blocksByStart;
+        /** function entry -> set of covered block-start addresses in it */
+        public final Map<Address, Set<Address>> coveredByFunction;
+
+        CoverageData(String moduleName, int blocksInFile, int blocksMapped,
+                     Map<Address, AddressSet> blocksByStart,
+                     Map<Address, Set<Address>> coveredByFunction) {
+            this.moduleName = moduleName;
+            this.blocksInFile = blocksInFile;
+            this.blocksMapped = blocksMapped;
+            this.blocksByStart = blocksByStart;
+            this.coveredByFunction = coveredByFunction;
+        }
+    }
+
+    /** Per-function rollup (single mode). */
     public static class FunctionCoverage {
         public final String name;
         public final Address entry;
@@ -51,7 +83,27 @@ public class CoveragePainter {
         }
     }
 
-    /** Outcome of applying a coverage file, for reporting back to the user. */
+    /** Per-function rollup (diff mode). */
+    public static class FunctionDiff {
+        public final String name;
+        public final Address entry;
+        public final int totalBlocks;
+        public final int baselineBlocks;
+        public final int targetBlocks;
+        public final int targetOnlyBlocks;
+
+        public FunctionDiff(String name, Address entry, int totalBlocks,
+                            int baselineBlocks, int targetBlocks, int targetOnlyBlocks) {
+            this.name = name;
+            this.entry = entry;
+            this.totalBlocks = totalBlocks;
+            this.baselineBlocks = baselineBlocks;
+            this.targetBlocks = targetBlocks;
+            this.targetOnlyBlocks = targetOnlyBlocks;
+        }
+    }
+
+    /** Result of a single-file paint. */
     public static class Result {
         public final String moduleName;
         public final int blocksInFile;
@@ -63,6 +115,22 @@ public class CoveragePainter {
             this.moduleName = moduleName;
             this.blocksInFile = blocksInFile;
             this.blocksMapped = blocksMapped;
+            this.functions = functions;
+        }
+    }
+
+    /** Result of a diff paint. */
+    public static class DiffResult {
+        public final int bothBlocks;
+        public final int targetOnlyBlocks;
+        public final int baselineOnlyBlocks;
+        public final List<FunctionDiff> functions;
+
+        public DiffResult(int bothBlocks, int targetOnlyBlocks, int baselineOnlyBlocks,
+                          List<FunctionDiff> functions) {
+            this.bothBlocks = bothBlocks;
+            this.targetOnlyBlocks = targetOnlyBlocks;
+            this.baselineOnlyBlocks = baselineOnlyBlocks;
             this.functions = functions;
         }
     }
@@ -109,17 +177,13 @@ public class CoveragePainter {
     }
 
     /**
-     * Rebase and paint the coverage for one module. Clears any coverage this
-     * painter applied previously first, so loading a new file replaces the old
-     * picture rather than layering on top of it.
+     * Rebase and snap one module's coverage to basic blocks, without painting.
+     * This is the shared front end for both single and diff painting.
      */
-    public Result apply(Coverage cov, Coverage.Module module) throws Exception {
-        clear();
-
+    public CoverageData computeCoverage(Coverage cov, Coverage.Module module) throws Exception {
         Address imageBase = program.getImageBase();
-        AddressSet toPaint = new AddressSet();
-        // function entry address -> set of covered basic-block start addresses
-        Map<Address, java.util.Set<Address>> coveredByFunction = new LinkedHashMap<>();
+        Map<Address, AddressSet> blocksByStart = new LinkedHashMap<>();
+        Map<Address, Set<Address>> coveredByFunction = new LinkedHashMap<>();
 
         List<Coverage.Block> blocks = module == null
                 ? cov.getBlocks() : cov.blocksForModule(module.id);
@@ -138,54 +202,153 @@ public class CoveragePainter {
             mapped++;
 
             CodeBlock cb = blockModel.getFirstCodeBlockContaining(addr, monitor);
+            Address start;
+            AddressSet range = new AddressSet();
             if (cb != null) {
-                toPaint.add(cb);
+                start = cb.getFirstStartAddress();
+                range.add(cb);
             } else {
-                // No defined block here (undefined bytes); paint the raw extent so
-                // the hit is still visible.
+                // No defined block here; use the raw extent so the hit is visible.
+                start = addr;
                 try {
-                    toPaint.addRange(addr, addr.add(Math.max(0, b.size - 1)));
+                    range.addRange(addr, addr.add(Math.max(0, b.size - 1)));
                 } catch (Exception e) {
-                    toPaint.add(addr);
+                    range.add(addr);
                 }
             }
+            blocksByStart.put(start, range);
 
             Function fn = functionManager.getFunctionContaining(addr);
             if (fn != null) {
-                Address blockStart = cb != null ? cb.getFirstStartAddress() : addr;
                 coveredByFunction
-                        .computeIfAbsent(fn.getEntryPoint(), k -> new java.util.HashSet<>())
-                        .add(blockStart);
+                        .computeIfAbsent(fn.getEntryPoint(), k -> new HashSet<>())
+                        .add(start);
             }
         }
 
+        String modName = module == null ? "(all modules)" : module.name();
+        return new CoverageData(modName, blocks.size(), mapped, blocksByStart, coveredByFunction);
+    }
+
+    /** Paint one coverage set green. Clears any previous painting first. */
+    public Result paintSingle(CoverageData data) throws Exception {
+        clear();
+
+        AddressSet toPaint = new AddressSet();
+        for (AddressSet range : data.blocksByStart.values()) {
+            toPaint.add(range);
+        }
         if (!toPaint.isEmpty()) {
             colorizer.setBackgroundColor(toPaint, COVERED_COLOR);
             painted.add(toPaint);
         }
 
-        List<FunctionCoverage> funcs = buildFunctionTable(coveredByFunction);
-        String modName = module == null ? "(all modules)" : module.name();
-        return new Result(modName, blocks.size(), mapped, funcs);
-    }
-
-    private List<FunctionCoverage> buildFunctionTable(
-            Map<Address, java.util.Set<Address>> coveredByFunction) throws Exception {
         List<FunctionCoverage> funcs = new ArrayList<>();
-        for (Map.Entry<Address, java.util.Set<Address>> e : coveredByFunction.entrySet()) {
+        for (Map.Entry<Address, Set<Address>> e : data.coveredByFunction.entrySet()) {
             Function fn = functionManager.getFunctionAt(e.getKey());
             if (fn == null) {
                 continue;
             }
             int total = countBlocks(fn.getBody());
-            int covered = e.getValue().size();
-            if (total > 0 && covered > total) {
-                covered = total;   // guard against off-by-one from raw-range fallbacks
-            }
+            int covered = Math.min(e.getValue().size(), total == 0 ? e.getValue().size() : total);
             funcs.add(new FunctionCoverage(fn.getName(), fn.getEntryPoint(), covered, total));
         }
         funcs.sort((a, b) -> Double.compare(b.percent(), a.percent()));
-        return funcs;
+        return new Result(data.moduleName, data.blocksInFile, data.blocksMapped, funcs);
+    }
+
+    /**
+     * Diff a baseline set against a target set and paint by membership: blocks in
+     * both are green, target-only are orange-red (the crash-unique path), and
+     * baseline-only are muted blue.
+     */
+    public DiffResult paintDiff(CoverageData baseline, CoverageData target) throws Exception {
+        clear();
+
+        AddressSet bothSet = new AddressSet();
+        AddressSet targetOnlySet = new AddressSet();
+        AddressSet baselineOnlySet = new AddressSet();
+
+        for (Map.Entry<Address, AddressSet> e : target.blocksByStart.entrySet()) {
+            if (baseline.blocksByStart.containsKey(e.getKey())) {
+                bothSet.add(e.getValue());
+            } else {
+                targetOnlySet.add(e.getValue());
+            }
+        }
+        for (Map.Entry<Address, AddressSet> e : baseline.blocksByStart.entrySet()) {
+            if (!target.blocksByStart.containsKey(e.getKey())) {
+                baselineOnlySet.add(e.getValue());
+            }
+        }
+
+        if (!baselineOnlySet.isEmpty()) {
+            colorizer.setBackgroundColor(baselineOnlySet, BASELINE_ONLY_COLOR);
+            painted.add(baselineOnlySet);
+        }
+        if (!bothSet.isEmpty()) {
+            colorizer.setBackgroundColor(bothSet, COVERED_COLOR);
+            painted.add(bothSet);
+        }
+        if (!targetOnlySet.isEmpty()) {
+            colorizer.setBackgroundColor(targetOnlySet, TARGET_ONLY_COLOR);
+            painted.add(targetOnlySet);
+        }
+
+        List<FunctionDiff> funcs = buildDiffTable(baseline, target);
+        int both = countStarts(target, baseline, true);
+        int targetOnly = target.blocksByStart.size() - both;
+        int baselineOnly = baseline.blocksByStart.size() - both;
+        return new DiffResult(both, targetOnly, baselineOnly, funcs);
+    }
+
+    /** Count block starts in target that are (also) in baseline. */
+    private int countStarts(CoverageData target, CoverageData baseline, boolean inBoth) {
+        int n = 0;
+        for (Address start : target.blocksByStart.keySet()) {
+            if (baseline.blocksByStart.containsKey(start) == inBoth) {
+                n++;
+            }
+        }
+        return n;
+    }
+
+    private List<FunctionDiff> buildDiffTable(CoverageData baseline, CoverageData target) throws Exception {
+        Set<Address> entries = new TreeSet<>();
+        entries.addAll(baseline.coveredByFunction.keySet());
+        entries.addAll(target.coveredByFunction.keySet());
+
+        List<FunctionDiff> out = new ArrayList<>();
+        for (Address entry : entries) {
+            Function fn = functionManager.getFunctionAt(entry);
+            if (fn == null) {
+                continue;
+            }
+            Set<Address> baseStarts = baseline.coveredByFunction.getOrDefault(entry, java.util.Collections.emptySet());
+            Set<Address> targStarts = target.coveredByFunction.getOrDefault(entry, java.util.Collections.emptySet());
+            int targetOnly = 0;
+            for (Address s : targStarts) {
+                if (!baseStarts.contains(s)) {
+                    targetOnly++;
+                }
+            }
+            int total = countBlocks(fn.getBody());
+            out.add(new FunctionDiff(fn.getName(), entry, total,
+                    baseStarts.size(), targStarts.size(), targetOnly));
+        }
+        // Most interesting first: functions the target reached uniquely.
+        out.sort((a, b) -> {
+            if (b.targetOnlyBlocks != a.targetOnlyBlocks) {
+                return Integer.compare(b.targetOnlyBlocks, a.targetOnlyBlocks);
+            }
+            return Integer.compare(b.targetBlocks, a.targetBlocks);
+        });
+        return out;
+    }
+
+    /** Backward-compatible single-file convenience: compute then paint green. */
+    public Result apply(Coverage cov, Coverage.Module module) throws Exception {
+        return paintSingle(computeCoverage(cov, module));
     }
 
     private int countBlocks(AddressSetView body) throws Exception {

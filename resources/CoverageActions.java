@@ -12,10 +12,20 @@ import ghidra.program.model.address.Address;
  */
 public interface CoverageActions {
 
-    /** Parse and paint the given drcov file, then refresh the table. */
+    /** Parse and paint one drcov file green (single-set view). */
     void applyCoverage(File file);
 
-    /** Remove all coverage colouring. */
+    /** Load a drcov file as the diff baseline (painted green) and remember it. */
+    void loadBaseline(File file);
+
+    /**
+     * Load a drcov file as the diff target and paint it against the baseline:
+     * blocks reached only by this file (e.g. a crash) stand out. Requires a
+     * baseline to have been loaded first.
+     */
+    void diffWith(File file);
+
+    /** Remove all coverage colouring and forget any baseline. */
     void clearCoverage();
 
     /** Navigate the Listing (and Graph) to an address. */

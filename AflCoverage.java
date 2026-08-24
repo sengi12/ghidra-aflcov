@@ -40,6 +40,7 @@ public class AflCoverage extends GhidraSrc implements CoverageActions {
     private CoveragePainter painter;
     private CoveragePanel panel;
     private AflCoverageProvider provider;
+    private CoveragePainter.CoverageData baseline;
 
     @Override
     protected void run() throws Exception {
@@ -99,12 +100,50 @@ public class AflCoverage extends GhidraSrc implements CoverageActions {
     }
 
     @Override
+    public void loadBaseline(File file) {
+        new Thread(() -> {
+            try {
+                Coverage cov = new DrcovParser().parse(file);
+                Coverage.Module module = painter.chooseModule(cov);
+                CoveragePainter.CoverageData data = painter.computeCoverage(cov, module);
+                CoveragePainter.Result result = inTransaction(() -> painter.paintSingle(data));
+                this.baseline = data;
+                SwingUtilities.invokeLater(() -> panel.showBaselineLoaded(result));
+            } catch (Exception e) {
+                String msg = e.getMessage() == null ? e.toString() : e.getMessage();
+                SwingUtilities.invokeLater(() -> panel.showError(msg));
+            }
+        }, "aflcov-baseline").start();
+    }
+
+    @Override
+    public void diffWith(File file) {
+        if (baseline == null) {
+            panel.showError("load a baseline first (Baseline…), then diff a crash against it");
+            return;
+        }
+        new Thread(() -> {
+            try {
+                Coverage cov = new DrcovParser().parse(file);
+                Coverage.Module module = painter.chooseModule(cov);
+                CoveragePainter.CoverageData target = painter.computeCoverage(cov, module);
+                CoveragePainter.DiffResult diff = inTransaction(() -> painter.paintDiff(baseline, target));
+                SwingUtilities.invokeLater(() -> panel.showDiff(diff));
+            } catch (Exception e) {
+                String msg = e.getMessage() == null ? e.toString() : e.getMessage();
+                SwingUtilities.invokeLater(() -> panel.showError(msg));
+            }
+        }, "aflcov-diff").start();
+    }
+
+    @Override
     public void clearCoverage() {
         try {
             inTransaction(() -> {
                 painter.clear();
                 return null;
             });
+            this.baseline = null;
             panel.showCleared();
         } catch (Exception e) {
             panel.showError(e.toString());
