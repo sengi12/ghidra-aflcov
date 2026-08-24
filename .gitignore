@@ -1,0 +1,7 @@
+# Ghidra compiled script bundles live in the user settings dir, not here,
+# but guard against stray build output landing in the checkout.
+*.class
+bin/
+__pycache__/
+*.pyc
+.DS_Store
