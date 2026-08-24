@@ -6,6 +6,11 @@
   highlighted in the Listing and the Function Graph.
 </p>
 
+<p align="center">
+  <img src="./imgs/ui.png" alt="UI/UX Example" width="620">
+</p>
+
+
 `ghidra-aflcov` is the Ghidra counterpart to the block-highlighting coverage view
 that afl-unicorn users know from Lighthouse in IDA. It reads a
 [drcov](https://dynamorio.org/page_drcov.html) coverage file — the same format
