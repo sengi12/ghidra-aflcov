@@ -7,7 +7,15 @@
 </p>
 
 <p align="center">
-  <img src="./imgs/ui.png" alt="UI/UX Example" width="620">
+  <img src="./imgs/afl-fuzzing.png" alt="AFL Fuzzing" width="620">
+</p>
+
+<p align="center">
+  <sub>See my version of afl-unicorn<br>
+</p>
+
+<p align="center">
+  <img src="./imgs/ghidra-diff.png" alt="UI/UX Example" width="620">
 </p>
 
 
