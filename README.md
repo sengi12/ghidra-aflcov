@@ -1,6 +1,10 @@
 <h1 align="center">ghidra-aflcov</h1>
 
 <p align="center">
+  <a href="https://github.com/sengi12/ghidra-aflcov/actions/workflows/build.yml"><img src="https://github.com/sengi12/ghidra-aflcov/actions/workflows/build.yml/badge.svg" alt="build"></a>
+</p>
+
+<p align="center">
   <strong>Fuzzing coverage, painted onto Ghidra.</strong><br>
   Load a drcov file and see exactly which basic blocks a run reached —
   highlighted in the Listing and the Function Graph.
@@ -41,7 +45,7 @@ fork, whose Unicorn harness records every executed block during emulation.
 
 ## Requirements
 
-- Ghidra 10.2 or higher.
+- Ghidra 11.3.2 or 12.1.3 (both need JDK 21); CI compiles against both on every push.
 - A drcov coverage file (from the afl-unicorn collector, or any drcov producer).
 
 ## Installation

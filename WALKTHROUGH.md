@@ -15,7 +15,7 @@ emulated by Unicorn.
 - Fuzzing set up per the afl-unicorn fork's
   [INSTALL_MACOS.md](https://github.com/sengi12/afl-unicorn/blob/unicorn2-coverage/unicorn_mode/INSTALL_MACOS.md)
   (AFL++, unicornafl, a Python 3.12 venv).
-- Ghidra 10.2+ and this repository.
+- Ghidra 11.3.2 or 12.1.3 (see [Requirements](./README.md#requirements)) and this repository.
 
 Set your paths and activate the fuzzing venv:
 
